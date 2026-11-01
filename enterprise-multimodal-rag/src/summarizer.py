@@ -1,58 +1,72 @@
 import os
 import sys
+import io
+import base64
+import requests
 from dotenv import load_dotenv
-from google import genai
 from PIL import Image
 
 load_dotenv(override=True)
 
+def compress_and_encode_image(image_path: str, max_dim: int = 800) -> str:
+    """
+    Downscales large screenshots/diagrams to max 800px and converts 
+    to optimized JPEG to keep HTTP payload size under 100KB.
+    """
+    with Image.open(image_path) as img:
+        img = img.convert("RGB")
+        # Resize maintaining aspect ratio
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=75, optimize=True)
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
 def generate_diagram_summary(image_path: str) -> str:
-    """
-    Sends an image artifact to Gemini Vision to generate a detailed, 
-    search-optimized technical summary.
-    """
-    api_key = os.getenv("GEMINI_API_KEY")
+    """Sends compressed image to Gemini 2.5 Flash for rapid analysis."""
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError("Missing GEMINI_API_KEY in .env file!")
 
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file not found at: {image_path}")
 
-    # Initialize Gemini Client
-    client = genai.Client(api_key=api_key)
-    image = Image.open(image_path)
+    # Compress image down to ~80KB before sending
+    base64_image = compress_and_encode_image(image_path)
 
     prompt = (
-        "You are an expert technical document analyst. Analyze this diagram/schematic in detail.\n"
-        "Provide a comprehensive technical description containing:\n"
-        "1. Diagram Type & Purpose (e.g., System Architecture, Flowchart, Circuit Schematic)\n"
-        "2. Key Components & Labels mentioned\n"
-        "3. Data Flow / Connections / Directional arrows\n"
-        "4. Important technical values, protocols, or formulas visible."
+        "Analyze this screenshot/diagram concisely. Identify:\n"
+        "1. Context & Purpose (e.g., REPL session, system diagram)\n"
+        "2. Key elements, inputs, outputs, or code methods visible\n"
+        "Keep the summary structured, technical, and under 150 words."
     )
 
-    print(f"[INFO] Processing diagram with Gemini 2.5 Flash: {image_path}")
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=[image, prompt]
-    )
-
-    print("[SUCCESS] Diagram summary generated successfully.")
-    return response.text
-
-
-if __name__ == "__main__":
-    print("=== Day 2: Vision Diagram Summarization Test (Gemini) ===")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
     
-    sample_img = "data/extracted_images/sample_diagram.png"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": base64_image
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    print(f"[INFO] Sending compressed image payload to Gemini 2.5 Flash...")
+    response = requests.post(url, headers=headers, json=payload, timeout=20)
+    res_json = response.json()
+
+    if response.status_code != 200:
+        error_msg = res_json.get("error", {}).get("message", str(res_json))
+        raise RuntimeError(f"API Error ({response.status_code}): {error_msg}")
+
+    return res_json["candidates"][0]["content"]["parts"][0]["text"]
     
-    if os.path.exists(sample_img):
-        try:
-            summary_output = generate_diagram_summary(sample_img)
-            print("\n--- Generated Summary Output ---")
-            print(summary_output)
-        except Exception as e:
-            print(f"[ERROR] Summarization failed: {e}", file=sys.stderr)
-    else:
-        print(f"\n[NOTICE] Place a sample diagram image at '{sample_img}' to test.")
