@@ -1,8 +1,7 @@
-venv/
 .env
+venv/
+qdrant_storage/
+data/extracted_images/
 __pycache__/
 *.pyc
-data/extracted_images/*
-!data/extracted_images/.gitkeep
-qdrant_storage/
 .DS_Store
